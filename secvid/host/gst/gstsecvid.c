@@ -6,7 +6,8 @@
  * buffers live in the TEE protected heap:
  *
  * secvidsrc: reads a stream whose units (access units or raw frames) were
- *   each encrypted on their own (location, sizes in index, one per line).
+ *   each encrypted on their own (location, sizes in index, one per line),
+ *   loops times over (performance runs from a short clip).
  *   mode=tee: the TA decrypts each unit into a fresh protected-heap DMA-buf.
  *   mode=clear: the file holds the plaintext XORed with 0xa5 (a reference
  *   run; the plaintext never sits in a file), restored into a DMA-buf from
@@ -106,10 +107,12 @@ struct _SecvidSrc {
 	SecvidSrcMode mode;
 	GstCaps *caps;
 	guint buffer_size;
+	guint loops;
 
 	FILE *f;
 	FILE *idx;
 	guint64 n;
+	guint played;
 	GstAllocator *allocator;
 	struct secvid tee;
 	gboolean tee_open;
@@ -123,6 +126,7 @@ enum {
 	PROP_SRC_HEAP,
 	PROP_SRC_CAPS,
 	PROP_SRC_BUFFER_SIZE,
+	PROP_SRC_LOOPS,
 };
 
 G_DEFINE_TYPE(SecvidSrc, secvid_src, GST_TYPE_PUSH_SRC)
@@ -157,6 +161,9 @@ static void secvid_src_set_property(GObject *object, guint id,
 	case PROP_SRC_BUFFER_SIZE:
 		self->buffer_size = g_value_get_uint(value);
 		break;
+	case PROP_SRC_LOOPS:
+		self->loops = g_value_get_uint(value);
+		break;
 	default:
 		G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, pspec);
 	}
@@ -185,6 +192,9 @@ static void secvid_src_get_property(GObject *object, guint id, GValue *value,
 		break;
 	case PROP_SRC_BUFFER_SIZE:
 		g_value_set_uint(value, self->buffer_size);
+		break;
+	case PROP_SRC_LOOPS:
+		g_value_set_uint(value, self->loops);
 		break;
 	default:
 		G_OBJECT_WARN_INVALID_PROPERTY_ID(object, id, pspec);
@@ -231,6 +241,7 @@ static gboolean secvid_src_start(GstBaseSrc *bsrc)
 	}
 	self->allocator = gst_dmabuf_allocator_new();
 	self->n = 0;
+	self->played = 0;
 	return TRUE;
 
 err:
@@ -318,8 +329,12 @@ static GstFlowReturn secvid_src_create(GstPushSrc *psrc, GstBuffer **out)
 	gsize len;
 	int fd;
 
-	if (fscanf(self->idx, "%zu", &len) != 1)
-		return GST_FLOW_EOS;
+	while (fscanf(self->idx, "%zu", &len) != 1) {
+		if (++self->played >= self->loops)
+			return GST_FLOW_EOS;
+		rewind(self->idx);
+		rewind(self->f);
+	}
 	data = g_malloc(len);
 	if (fread(data, 1, len, self->f) != len) {
 		g_free(data);
@@ -403,6 +418,10 @@ static void secvid_src_class_init(SecvidSrcClass *klass)
 				  "Minimum bytes per buffer (0: the unit's size)",
 				  0, G_MAXUINT, 0,
 				  G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(object_class, PROP_SRC_LOOPS,
+		g_param_spec_uint("loops", "Loops",
+				  "Times the stream is played", 1, G_MAXUINT, 1,
+				  G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
 	gst_element_class_add_static_pad_template(element_class, &src_template);
 	gst_element_class_set_static_metadata(element_class,
@@ -419,6 +438,7 @@ static void secvid_src_class_init(SecvidSrcClass *klass)
 static void secvid_src_init(SecvidSrc *self)
 {
 	self->mode = SECVID_MODE_TEE;
+	self->loops = 1;
 }
 
 /* secviddigestsink */
